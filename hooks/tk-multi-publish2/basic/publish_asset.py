@@ -345,7 +345,7 @@ class UnrealAssetPublishPlugin(HookBaseClass):
         fields["MM"] = date.month
         fields["DD"] = date.day
 
-        # Stash the Unrea asset path and name in properties
+        # Stash the Unreal asset path and name in properties
         item.properties["asset_path"] = asset_path
         item.properties["asset_name"] = asset_name
 

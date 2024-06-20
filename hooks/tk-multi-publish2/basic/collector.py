@@ -171,17 +171,18 @@ class UnrealSessionCollector(HookBaseClass):
         sequence_edits = None
         # Iterate through the selected assets and get their info and add them as items to be published
         for asset in unreal_sg.selected_assets:
-            if asset.asset_class == "LevelSequence":
+            if asset.asset_class_path.asset_name == "LevelSequence":
                 if sequence_edits is None:
                     sequence_edits = self.retrieve_sequence_edits()
                 self.collect_level_sequence(parent_item, asset, sequence_edits)
             else:
+                asset_object_path = str(asset.package_name) + "." + str(asset.asset_name)
                 self.create_asset_item(
                     parent_item,
                     # :class:`Name` instances, we cast them to strings otherwise
                     # string operations fail down the line..
-                    "%s" % asset.object_path,
-                    "%s" % asset.asset_class,
+                    "%s" % asset_object_path,
+                    "%s" % asset.asset_class_path.asset_name,
                     "%s" % asset.asset_name,
                 )
 
@@ -255,7 +256,9 @@ class UnrealSessionCollector(HookBaseClass):
         :param sequence_edits: A dictionary with  :class:`unreal.LevelSequence as keys and
                                               lists of :class:`SequenceEdit` as values.
         """
-        level_sequence = unreal.load_asset(asset.object_path)
+        asset_object_path = str(asset.package_name) + "." + str(asset.asset_name)
+        level_sequence = unreal.load_asset(asset_object_path)
+
         for edits_path in self.get_all_paths_from_sequence(level_sequence, sequence_edits):
             # Reverse the path to have it from top master sequence to the shot.
             edits_path.reverse()
@@ -287,9 +290,12 @@ class UnrealSessionCollector(HookBaseClass):
 
         asset_helper = unreal.AssetRegistryHelpers.get_asset_registry()
         # Retrieve all Level Sequence assets
-        all_level_sequences = asset_helper.get_assets_by_class("LevelSequence")
+        path = unreal.TopLevelAssetPath('/Script/Engine', 'LevelSequence')
+        all_level_sequences = asset_helper.get_assets_by_class(path)
+
         for lvseq_asset in all_level_sequences:
-            lvseq = unreal.load_asset(lvseq_asset.object_path, unreal.LevelSequence)
+            lvseq_asset_object_path = str(lvseq_asset.package_name) + "." + str(lvseq_asset.asset_name)
+            lvseq = unreal.load_asset(lvseq_asset_object_path, unreal.LevelSequence)
             # Check shots
             for track in lvseq.find_master_tracks_by_type(unreal.MovieSceneCinematicShotTrack):
                 for section in track.get_sections():

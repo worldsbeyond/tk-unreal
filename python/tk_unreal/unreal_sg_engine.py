@@ -148,7 +148,8 @@ class ShotgunEngineWrapper(UESGEngine):
             # Asset must be loaded to read the metadata from item
             # Note that right-clicking on an asset in the Unreal Content Browser already loads item
             # But a load could be triggered if the context is from a selected actor
-            loaded_asset = unreal.EditorAssetLibrary.load_asset(selected_asset.object_path)
+            selected_asset_path = str(selected_asset.package_name) + "." + str(selected_asset.asset_name)
+            loaded_asset = unreal.EditorAssetLibrary.load_asset(selected_asset_path)
         elif selected_actor:
             # Get the asset that is associated with the selected actor
             assets = self.get_referenced_assets(selected_actor)

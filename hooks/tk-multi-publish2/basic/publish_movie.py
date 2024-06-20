@@ -9,6 +9,7 @@ from tank_vendor import six
 import copy
 import datetime
 import os
+import shutil
 import pprint
 import subprocess
 import sys
@@ -96,11 +97,6 @@ class UnrealMoviePublishPlugin(HookBaseClass):
                 "default": None,
                 "description": "Optional Unreal Path to saved presets "
                                "for rendering with the Movie Render Queue"
-            },
-            "Publish Folder": {
-                "type": "string",
-                "default": None,
-                "description": "Optional folder to use as a root for publishes"
             }
         }
 
@@ -152,30 +148,11 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         for preset in unreal.EditorAssetLibrary.list_assets(presets_folder.path):
             settings_frame.unreal_render_presets_widget.addItem(preset.split(".")[0])
 
-        settings_frame.unreal_publish_folder_label = QtGui.QLabel("Publish folder:")
-        storage_roots = self.parent.shotgun.find(
-            "LocalStorage",
-            [],
-            ["code", _OS_LOCAL_STORAGE_PATH_FIELD]
-        )
-        settings_frame.storage_roots_widget = QtGui.QComboBox()
-        settings_frame.storage_roots_widget.addItem("Current Unreal Project")
-        for storage_root in storage_roots:
-            if storage_root[_OS_LOCAL_STORAGE_PATH_FIELD]:
-                settings_frame.storage_roots_widget.addItem(
-                    "%s (%s)" % (
-                        storage_root["code"],
-                        storage_root[_OS_LOCAL_STORAGE_PATH_FIELD]
-                    ),
-                    userData=storage_root,
-                )
         # Create the layout to use within the QFrame
         settings_layout = QtGui.QVBoxLayout()
         settings_layout.addWidget(settings_frame.description_label)
         settings_layout.addWidget(settings_frame.unreal_render_presets_label)
         settings_layout.addWidget(settings_frame.unreal_render_presets_widget)
-        settings_layout.addWidget(settings_frame.unreal_publish_folder_label)
-        settings_layout.addWidget(settings_frame.storage_roots_widget)
 
         settings_layout.addStretch()
         settings_frame.setLayout(settings_layout)
@@ -197,15 +174,9 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         render_presets_path = None
         if widget.unreal_render_presets_widget.currentIndex() > 0:  # First entry is "No Presets"
             render_presets_path = six.ensure_str(widget.unreal_render_presets_widget.currentText())
-        storage_index = widget.storage_roots_widget.currentIndex()
-        publish_folder = None
-        if storage_index > 0:  # Something selected and not the first entry
-            storage = widget.storage_roots_widget.itemData(storage_index, role=QtCore.Qt.UserRole)
-            publish_folder = storage[_OS_LOCAL_STORAGE_PATH_FIELD]
 
         settings = {
-            "Movie Render Queue Presets Path": render_presets_path,
-            "Publish Folder": publish_folder,
+            "Movie Render Queue Presets Path": render_presets_path
         }
         return settings
 
@@ -231,23 +202,6 @@ class UnrealMoviePublishPlugin(HookBaseClass):
             preset_index = widget.unreal_render_presets_widget.findText(render_presets_path)
             self.logger.info("Index for %s is %s" % (render_presets_path, preset_index))
         widget.unreal_render_presets_widget.setCurrentIndex(preset_index)
-        # Note: the template is validated in the accept method, no need to check it here.
-        publish_template_setting = cur_settings.get("Publish Template")
-        publisher = self.parent
-        publish_template = publisher.get_template_by_name(publish_template_setting)
-        if isinstance(publish_template, sgtk.TemplatePath):
-            widget.unreal_publish_folder_label.setEnabled(False)
-            widget.storage_roots_widget.setEnabled(False)
-        folder_index = 0
-        publish_folder = cur_settings["Publish Folder"]
-        if publish_folder:
-            for i in range(widget.storage_roots_widget.count()):
-                data = widget.storage_roots_widget.itemData(i, role=QtCore.Qt.UserRole)
-                if data and data[_OS_LOCAL_STORAGE_PATH_FIELD] == publish_folder:
-                    folder_index = i
-                    break
-            self.logger.debug("Index for %s is %s" % (publish_folder, folder_index))
-        widget.storage_roots_widget.setCurrentIndex(folder_index)
 
     def load_saved_ui_settings(self, settings):
         """
@@ -267,12 +221,6 @@ class UnrealMoviePublishPlugin(HookBaseClass):
             settings["Movie Render Queue Presets Path"].value,
             settings_manager.SCOPE_PROJECT,
         )
-        settings["Publish Folder"].value = settings_manager.retrieve(
-            "publish2.publish_folder",
-            settings["Publish Folder"].value,
-            settings_manager.SCOPE_PROJECT
-        )
-        self.logger.debug("Loaded settings %s" % settings["Publish Folder"])
         self.logger.debug("Loaded settings %s" % settings["Movie Render Queue Presets Path"])
 
     def save_ui_settings(self, settings):
@@ -289,8 +237,6 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         # Save settings
         render_presets_path = settings["Movie Render Queue Presets Path"].value
         settings_manager.store("publish2.movie_render_queue_presets_path", render_presets_path, settings_manager.SCOPE_PROJECT)
-        publish_folder = settings["Publish Folder"].value
-        settings_manager.store("publish2.publish_folder", publish_folder, settings_manager.SCOPE_PROJECT)
 
     def accept(self, settings, item):
         """
@@ -381,16 +327,15 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         asset_path = item.properties.get("asset_path")
         asset_name = item.properties.get("asset_name")
         if not asset_path or not asset_name:
-            self.logger.debug("Sequence path or name not configured.")
+            self.logger.error("Sequence path or name not configured.")
             return False
         # Retrieve the Level Sequences sections tree for this Level Sequence.
         # This is needed to get frame ranges in the "edit" context.
         edits_path = item.properties.get("edits_path")
         if not edits_path:
-            self.logger.debug("Edits path not configured.")
+            self.logger.error("Edits path not configured.")
             return False
 
-        self.logger.info("Edits path %s" % edits_path)
         item.properties["unreal_master_sequence"] = edits_path[0]
         item.properties["unreal_shot"] = ".".join([lseq.get_name() for lseq in edits_path[1:]])
         self.logger.info("Master sequence %s, shot %s" % (
@@ -403,6 +348,16 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         # Get the context from the Publisher UI
         context = item.context
         unreal.log("context: {}".format(context))
+
+        # Verify task selection
+        if not item.context.task:
+            self.logger.error("No task was selected.")
+            return False
+
+        # Verify description
+        if not item.description:
+            self.logger.error("Required description is missing.")
+            return False
 
         # Query the fields needed for the publish template from the context
         try:
@@ -425,17 +380,12 @@ class UnrealMoviePublishPlugin(HookBaseClass):
 
         # Transient maps are not supported, must be saved on disk
         if unreal_map_path.startswith("/Temp/"):
-            self.logger.debug("Current map must be saved first.")
+            self.logger.error("Current map must be saved first.")
             return False
 
-        # Add the map name to fields
-        world_name = unreal_map.get_name()
-        # Add the Level Sequence to fields, with the shot if any
-        fields["ue_world"] = world_name
-        if len(edits_path) > 1:
-            fields["ue_level_sequence"] = "%s_%s" % (edits_path[0].get_name(), edits_path[-1].get_name())
-        else:
-            fields["ue_level_sequence"] = edits_path[0].get_name()
+        # Add project directory to fields
+        fields["ue_project_directory"] = unreal.SystemLibrary.get_project_directory()
+        fields["ue_level_sequence"] = edits_path[0].get_name()
 
         # Stash the level sequence and map paths in properties for the render
         item.properties["unreal_asset_path"] = asset_path
@@ -495,17 +445,7 @@ class UnrealMoviePublishPlugin(HookBaseClass):
             raise ValueError(error_msg)
 
         publish_path = publish_template.apply_fields(fields)
-        if not os.path.isabs(publish_path):
-            # If the path is not absolute, prepend the publish folder setting.
-            publish_folder = settings["Publish Folder"].value
-            if not publish_folder:
-                publish_folder = unreal.Paths.project_saved_dir()
-            publish_path = os.path.abspath(
-                os.path.join(
-                    publish_folder,
-                    publish_path
-                )
-            )
+
         item.properties["path"] = publish_path
         item.properties["publish_path"] = publish_path
         item.properties["publish_type"] = "Unreal Render"
@@ -861,34 +801,27 @@ class UnrealMoviePublishPlugin(HookBaseClass):
 
         # We can't control the name of the manifest file, so we save and then rename the file.
         _, manifest_path = unreal.MoviePipelineEditorLibrary.save_queue_to_manifest_file(queue)
+        _, manifest_file = os.path.split(manifest_path)
 
-        manifest_path = os.path.abspath(manifest_path)
-        manifest_dir, manifest_file = os.path.split(manifest_path)
+        # We now need a path local to the Unreal project "Saved" folder.
+        manifest_dir = os.path.join(unreal.SystemLibrary.get_project_directory(), "Saved")
+
         f, new_path = tempfile.mkstemp(
             suffix=os.path.splitext(manifest_file)[1],
             dir=manifest_dir
         )
         os.close(f)
-        os.replace(manifest_path, new_path)
 
-        self.logger.debug("Queue manifest saved in %s" % new_path)
-        # We now need a path local to the unreal project "Saved" folder.
-        manifest_path = new_path.replace(
-            "%s%s" % (
-                os.path.abspath(
-                    os.path.join(unreal.SystemLibrary.get_project_directory(), "Saved")
-                ),
-                os.path.sep,
-            ),
-            "",
-        )
+        shutil.move(manifest_path, new_path)
+        manifest_path = new_path.replace("\\", "/")
+
         self.logger.debug("Manifest short path: %s" % manifest_path)
         # Command line parameters were retrieved by submitting a queue in Unreal Editor with
         # a MoviePipelineNewProcessExecutor executor.
         # https://docs.unrealengine.com/4.27/en-US/PythonAPI/class/MoviePipelineNewProcessExecutor.html?highlight=executor
         cmd_args = [
-            sys.executable,
-            "%s" % os.path.join(
+            "\"%s\"" % sys.executable,
+            "\"%s\"" % os.path.join(
                 unreal.SystemLibrary.get_project_directory(),
                 "%s.uproject" % unreal.SystemLibrary.get_game_name(),
             ),
@@ -929,13 +862,13 @@ class UnrealMoviePublishPlugin(HookBaseClass):
                 "a.URO.Enable=0",
             ]),
             "-execcmds=r.HLOD 0",
-            # This need to be a path relative the to the Unreal project "Saved" folder.
-            "-MoviePipelineConfig=\"%s\"" % manifest_path,
+            # This needs to be a path relative the to the Unreal project "Saved" folder.
+            "-MoviePipelineConfig=\"%s\"" % manifest_path
         ]
+        cmd_arg = " ".join(cmd_args)
+        unreal.log(cmd_args)
         unreal.log(
-            "Movie Queue command-line arguments: {}".format(
-                " ".join(cmd_args)
-            )
+            "Movie Queue command-line arguments: {}".format(cmd_arg)
         )
         # Make a shallow copy of the current environment and clear some variables
         run_env = copy.copy(os.environ)
@@ -944,6 +877,6 @@ class UnrealMoviePublishPlugin(HookBaseClass):
             del run_env["UE_SHOTGUN_BOOTSTRAP"]
         if "UE_SHOTGRID_BOOTSTRAP" in run_env:
             del run_env["UE_SHOTGRID_BOOTSTRAP"]
-        self.logger.info("Running %s" % cmd_args)
-        subprocess.call(cmd_args, env=run_env)
+        self.logger.info("Running %s" % cmd_arg)
+        subprocess.call(cmd_arg, env=run_env)
         return os.path.isfile(output_path), output_path
