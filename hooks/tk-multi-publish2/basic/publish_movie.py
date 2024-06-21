@@ -55,9 +55,6 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         will also be created in Shotgun with the movie file being uploaded
         there. Other users will be able to review the movie in the browser or
         in RV.
-        <br>
-        If available, the Movie Render Queue will be used for rendering,
-        the Level Sequencer will be used otherwise.
         """
 
     @property
@@ -144,9 +141,15 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         settings_frame.unreal_render_presets_label = QtGui.QLabel("Render with Movie Pipeline Presets:")
         settings_frame.unreal_render_presets_widget = QtGui.QComboBox()
         settings_frame.unreal_render_presets_widget.addItem("No presets")
-        presets_folder = unreal.MovieRenderPipelineProjectSettings().preset_save_dir
-        for preset in unreal.EditorAssetLibrary.list_assets(presets_folder.path):
-            settings_frame.unreal_render_presets_widget.addItem(preset.split(".")[0])
+
+        config_class = unreal.MoviePipelineMasterConfig.static_class()
+        asset_registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        top_level_asset_path = unreal.TopLevelAssetPath(package_name=config_class.get_package().get_name(),
+                                                        asset_name=config_class.get_name())
+        presets = asset_registry.get_assets_by_class(top_level_asset_path, True)
+
+        for preset in presets:
+            settings_frame.unreal_render_presets_widget.addItem(str(preset.package_name))
 
         # Create the layout to use within the QFrame
         settings_layout = QtGui.QVBoxLayout()
@@ -403,39 +406,23 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         fields["DD"] = date.day
 
         # Check if we can use the Movie Render queue available from 4.26
-        use_movie_render_queue = False
         render_presets = None
-        if hasattr(unreal, "MoviePipelineQueueEngineSubsystem"):
-            if hasattr(unreal, "MoviePipelineAppleProResOutput"):
-                use_movie_render_queue = True
-                self.logger.info("Movie Render Queue will be used for rendering.")
-                render_presets_path = settings["Movie Render Queue Presets Path"].value
-                if render_presets_path:
-                    self.logger.info("Validating render presets path %s" % render_presets_path)
-                    render_presets = unreal.EditorAssetLibrary.load_asset(render_presets_path)
-                    for _, reason in self._check_render_settings(render_presets):
-                        self.logger.warning(reason)
-            else:
-                self.logger.info(
-                    "Apple ProRes Media plugin must be loaded to be able to render with the Movie Render Queue, "
-                    "Level Sequencer will be used for rendering."
-                )
-
-        if not use_movie_render_queue:
-            if item.properties["unreal_shot"]:
-                raise ValueError("Rendering invidual shots for a sequence is only supported with the Movie Render Queue.")
-            self.logger.info("Movie Render Queue not available, Level Sequencer will be used for rendering.")
-
-        item.properties["use_movie_render_queue"] = use_movie_render_queue
-        item.properties["movie_render_queue_presets"] = render_presets
-        # Set the UE movie extension based on the current platform and rendering engine
-        if use_movie_render_queue:
-            fields["ue_mov_ext"] = "mov"  # mov on all platforms
+        if hasattr(unreal, "MoviePipelineAppleProResOutput"):
+            self.logger.info("Movie Render Queue will be used for rendering.")
+            render_presets_path = settings["Movie Render Queue Presets Path"].value
+            if render_presets_path:
+                self.logger.info("Validating render presets path %s" % render_presets_path)
+                render_presets = unreal.EditorAssetLibrary.load_asset(render_presets_path)
+                for _, reason in self._check_render_settings(render_presets):
+                    self.logger.warning(reason)
         else:
-            if sys.platform == "win32":
-                fields["ue_mov_ext"] = "avi"
-            else:
-                fields["ue_mov_ext"] = "mov"
+            self.logger.error(
+                "Apple ProRes Media plugin must be loaded to be able to render with the Movie Render Queue."
+            )
+
+        item.properties["movie_render_queue_presets"] = render_presets
+        fields["ue_mov_ext"] = "mov"  # mov on all platforms
+
         # Ensure the fields work for the publish template
         missing_keys = publish_template.missing_keys(fields)
         if missing_keys:
@@ -504,27 +491,21 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         unreal_asset_path = item.properties["unreal_asset_path"]
         unreal_map_path = item.properties["unreal_map_path"]
         unreal.log("movie name: {}".format(movie_name))
+
         # Render the movie
-        if item.properties.get("use_movie_render_queue"):
-            presets = item.properties["movie_render_queue_presets"]
-            if presets:
-                self.logger.info("Rendering %s with the Movie Render Queue with %s presets." % (publish_path, presets.get_name()))
-            else:
-                self.logger.info("Rendering %s with the Movie Render Queue." % publish_path)
-            res, _ = self._unreal_render_sequence_with_movie_queue(
-                publish_path,
-                unreal_map_path,
-                unreal_asset_path,
-                presets,
-                item.properties.get("unreal_shot") or None,
-            )
+        presets = item.properties["movie_render_queue_presets"]
+        if presets:
+            self.logger.info("Rendering %s with the Movie Render Queue with %s presets." % (publish_path, presets.get_name()))
         else:
-            self.logger.info("Rendering %s with the Level Sequencer." % publish_path)
-            res, _ = self._unreal_render_sequence_with_sequencer(
-                publish_path,
-                unreal_map_path,
-                unreal_asset_path
-            )
+            self.logger.info("Rendering %s with the Movie Render Queue." % publish_path)
+        res, _ = self._unreal_render_sequence_with_movie_queue(
+            publish_path,
+            unreal_map_path,
+            unreal_asset_path,
+            presets,
+            item.properties.get("unreal_shot") or None,
+        )
+
         if not res:
             raise RuntimeError(
                 "Unable to render %s" % publish_path
@@ -653,78 +634,6 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         for dialog in engine.created_qt_dialogs:
             dialog.raise_()
 
-    def _unreal_render_sequence_with_sequencer(self, output_path, unreal_map_path, sequence_path):
-        """
-        Renders a given sequence in a given level to a movie file with the Level Sequencer.
-
-        :param str output_path: Full path to the movie to render.
-        :param str unreal_map_path: Path of the Unreal map in which to run the sequence.
-        :param str sequence_path: Content Browser path of sequence to render.
-        :returns: True if a movie file was generated, False otherwise
-                  string representing the path of the generated movie file
-        """
-        output_folder, output_file = os.path.split(output_path)
-        movie_name = os.path.splitext(output_file)[0]
-
-        # First, check if there's a file that will interfere with the output of the Sequencer
-        # Sequencer can only render to avi or mov file format
-        if os.path.isfile(output_path):
-            # Must delete it first, otherwise the Sequencer will add a number in the filename
-            try:
-                os.remove(output_path)
-            except OSError:
-                self.logger.error(
-                    "Couldn't delete {}. The Sequencer won't be able to output the movie to that file.".format(output_path)
-                )
-                return False, None
-
-        # Render the sequence to a movie file using the following command-line arguments
-        cmdline_args = [
-            sys.executable,  # Unreal executable path
-            "%s" % os.path.join(
-                unreal.SystemLibrary.get_project_directory(),
-                "%s.uproject" % unreal.SystemLibrary.get_game_name(),
-            ),  # Unreal project
-            unreal_map_path,  # Level to load for rendering the sequence
-            # Command-line arguments for Sequencer Render to Movie
-            # See: https://docs.unrealengine.com/en-us/Engine/Sequencer/Workflow/RenderingCmdLine
-            #
-            "-LevelSequence=%s" % sequence_path,  # The sequence to render
-            "-MovieFolder=%s" % output_folder,  # Output folder, must match the work template
-            "-MovieName=%s" % movie_name,  # Output filename
-            "-game",
-            "-MovieSceneCaptureType=/Script/MovieSceneCapture.AutomatedLevelSequenceCapture",
-            "-ResX=1280",
-            "-ResY=720",
-            "-ForceRes",
-            "-Windowed",
-            "-MovieCinematicMode=yes",
-            "-MovieFormat=Video",
-            "-MovieFrameRate=24",
-            "-MovieQuality=75",
-            "-NoTextureStreaming",
-            "-NoLoadingScreen",
-            "-NoScreenMessages",
-        ]
-
-        unreal.log(
-            "Sequencer command-line arguments: {}".format(
-                " ".join(cmdline_args)
-            )
-        )
-
-        # Make a shallow copy of the current environment and clear some variables
-        run_env = copy.copy(os.environ)
-        # Prevent SG TK to try to bootstrap in the new process
-        if "UE_SHOTGUN_BOOTSTRAP" in run_env:
-            del run_env["UE_SHOTGUN_BOOTSTRAP"]
-        if "UE_SHOTGRID_BOOTSTRAP" in run_env:
-            del run_env["UE_SHOTGRID_BOOTSTRAP"]
-
-        subprocess.call(cmdline_args, env=run_env)
-
-        return os.path.isfile(output_path), output_path
-
     def _unreal_render_sequence_with_movie_queue(self, output_path, unreal_map_path, sequence_path, presets=None, shot_name=None):
         """
         Renders a given sequence in a given level with the Movie Render queue.
@@ -768,7 +677,7 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         # https://docs.unrealengine.com/4.26/en-US/PythonAPI/class/MoviePipelineOutputSetting.html?highlight=setting#unreal.MoviePipelineOutputSetting
         output_setting = config.find_or_add_setting_by_class(unreal.MoviePipelineOutputSetting)
         output_setting.output_directory = unreal.DirectoryPath(output_folder)
-        output_setting.output_resolution = unreal.IntPoint(1280, 720)
+        output_setting.output_resolution = unreal.IntPoint(1920, 1080)
         output_setting.file_name_format = movie_name
         output_setting.override_existing_output = True  # Overwrite existing files
         # If needed we could enforce a frame rate, like for the Sequencer code.
@@ -782,8 +691,10 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         # Default rendering
         config.find_or_add_setting_by_class(unreal.MoviePipelineDeferredPassBase)
         # Render to a movie
-        config.find_or_add_setting_by_class(unreal.MoviePipelineAppleProResOutput)
-        # TODO: check which codec we should use.
+        codec_setting = config.find_or_add_setting_by_class(unreal.MoviePipelineAppleProResOutput)
+        codec_setting.codec = unreal.AppleProResEncoderCodec.PRO_RES_422
+
+        job.set_configuration(config)
 
         # We render in a forked process that we can control.
         # It would be possible to render in from the running process using an
