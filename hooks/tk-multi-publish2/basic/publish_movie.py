@@ -513,9 +513,6 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         # Increment the version number
         self._unreal_asset_set_version(unreal_asset_path, item.properties["version_number"])
 
-        # Publish the movie file to Shotgun
-        super(UnrealMoviePublishPlugin, self).publish(settings, item)
-
         # Create a Version entry linked with the new publish
         # Populate the version data to send to SG
         self.logger.info("Creating Version...")
@@ -527,12 +524,6 @@ class UnrealMoviePublishPlugin(HookBaseClass):
             "sg_path_to_movie": publish_path,
             "sg_task": item.context.task
         }
-
-        publish_data = item.properties.get("sg_publish_data")
-
-        # If the file was published, add the publish data to the version
-        if publish_data:
-            version_data["published_files"] = [publish_data]
 
         # Log the version data for debugging
         self.logger.debug(
@@ -581,6 +572,9 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         :param item: Item to process
         """
         # do the base class finalization
+        if 'sg_publish_data' not in item.properties:
+            return
+
         super(UnrealMoviePublishPlugin, self).finalize(settings, item)
 
     def _get_version_entity(self, item):
