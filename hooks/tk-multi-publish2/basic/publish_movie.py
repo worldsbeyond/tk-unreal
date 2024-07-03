@@ -49,12 +49,9 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         contain simple html for formatting.
         """
 
-        return """Publishes the sequence as a rendered movie to Shotgun. A
-        <b>Publish</b> entry will be created in Shotgun which will include a
-        reference to the movie's current path on disk. A <b>Version</b> entry
-        will also be created in Shotgun with the movie file being uploaded
-        there. Other users will be able to review the movie in the browser or
-        in RV.
+        return """Publishes the sequence as a rendered movie to Shotgun. A <b>Version</b>
+        entry will be created in Shotgun with the movie file uploaded. Other users will be
+        able to review the movie in the browser or in RV.
         """
 
     @property
@@ -80,6 +77,9 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         # inherit the settings from the base publish plugin
         base_settings = super(UnrealMoviePublishPlugin, self).settings or {}
 
+        current_level = unreal.EditorLevelLibrary.get_editor_world()
+        current_level_path = current_level.get_path_name()
+
         # Here you can add any additional settings specific to this plugin
         publish_template_setting = {
             "Publish Template": {
@@ -88,6 +88,11 @@ class UnrealMoviePublishPlugin(HookBaseClass):
                 "description": "Template path for published work files. Should"
                                "correspond to a template defined in "
                                "templates.yml.",
+            },
+            "Level Path": {
+                "type": "string",
+                "default": current_level_path,
+                "description": "Unreal Level Path"
             },
             "Movie Render Queue Presets Path": {
                 "type": "string",
@@ -137,7 +142,22 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         settings_frame.description_label.setOpenExternalLinks(True)
         settings_frame.description_label.setTextFormat(QtCore.Qt.RichText)
 
-        # Unreal setttings
+        # Unreal settings
+
+        # Level path
+        settings_frame.unreal_levels_label = QtGui.QLabel("Level Path:")
+        settings_frame.unreal_levels_widget = QtGui.QComboBox()
+
+        world_class = unreal.World.static_class()
+        asset_registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        top_level_asset_path = unreal.TopLevelAssetPath(package_name=world_class.get_package().get_name(),
+                                                        asset_name=world_class.get_name())
+        levels = asset_registry.get_assets_by_class(top_level_asset_path, True)
+
+        for level in levels:
+            settings_frame.unreal_levels_widget.addItem(str(level.package_name))
+
+        # Preset path
         settings_frame.unreal_render_presets_label = QtGui.QLabel("Render with Movie Pipeline Presets:")
         settings_frame.unreal_render_presets_widget = QtGui.QComboBox()
         settings_frame.unreal_render_presets_widget.addItem("No presets")
@@ -154,6 +174,8 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         # Create the layout to use within the QFrame
         settings_layout = QtGui.QVBoxLayout()
         settings_layout.addWidget(settings_frame.description_label)
+        settings_layout.addWidget(settings_frame.unreal_levels_label)
+        settings_layout.addWidget(settings_frame.unreal_levels_widget)
         settings_layout.addWidget(settings_frame.unreal_render_presets_label)
         settings_layout.addWidget(settings_frame.unreal_render_presets_widget)
 
@@ -169,16 +191,20 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         """
         # defer Qt-related imports
         from sgtk.platform.qt import QtCore
-
         self.logger.info("Getting settings from UI")
 
         # Please note that we don't have to return all settings here, just the
         # settings which are editable in the UI.
+        level_path = None
         render_presets_path = None
+
+        level_path = six.ensure_str(widget.unreal_levels_widget.currentText())
+
         if widget.unreal_render_presets_widget.currentIndex() > 0:  # First entry is "No Presets"
             render_presets_path = six.ensure_str(widget.unreal_render_presets_widget.currentText())
 
         settings = {
+            "Level Path": level_path,
             "Movie Render Queue Presets Path": render_presets_path
         }
         return settings
@@ -199,19 +225,29 @@ class UnrealMoviePublishPlugin(HookBaseClass):
             # We do not allow editing multiple items
             raise NotImplementedError
         cur_settings = settings[0]
+
+        level_path = cur_settings["Level Path"]
         render_presets_path = cur_settings["Movie Render Queue Presets Path"]
+
+        level_index = 0
+        if level_path:
+            level_index = widget.unreal_levels_widget.findText(level_path)
+            self.logger.info("Index for %s is %s" % (level_path, level_index))
+        widget.unreal_levels_widget.setCurrentIndex(level_index)
+
         preset_index = 0
         if render_presets_path:
             preset_index = widget.unreal_render_presets_widget.findText(render_presets_path)
             self.logger.info("Index for %s is %s" % (render_presets_path, preset_index))
         widget.unreal_render_presets_widget.setCurrentIndex(preset_index)
 
-    def load_saved_ui_settings(self, settings):
+    def load_saved_ui_settings(self, settings, item):
         """
         Load saved settings and update the given settings dictionary with them.
 
         :param settings: A dictionary where keys are settings names and
                          values Settings instances.
+        :param item: Item to process.
         """
         # Retrieve SG utils framework settings module and instantiate a manager
         fw = self.load_framework("tk-framework-shotgunutils_v5.x.x")
@@ -219,18 +255,29 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         settings_manager = module.UserSettings(self.parent)
 
         # Retrieve saved settings
+        level_map = settings_manager.retrieve(
+            "publish2.level_map",
+            default={},
+            scope=settings_manager.SCOPE_PROJECT
+        )
+        asset_path = item.properties.get("asset_path")
+        if asset_path in level_map:
+            settings["Level Path"].value = level_map[asset_path]
+
         settings["Movie Render Queue Presets Path"].value = settings_manager.retrieve(
             "publish2.movie_render_queue_presets_path",
             settings["Movie Render Queue Presets Path"].value,
             settings_manager.SCOPE_PROJECT,
         )
+        self.logger.debug("Loaded settings %s" % settings["Level Path"])
         self.logger.debug("Loaded settings %s" % settings["Movie Render Queue Presets Path"])
 
-    def save_ui_settings(self, settings):
+    def save_ui_settings(self, settings, item):
         """
         Save UI settings.
 
         :param settings: A dictionary of Settings instances.
+        :param item: Item to process.
         """
         # Retrieve SG utils framework settings module and instantiate a manager
         fw = self.load_framework("tk-framework-shotgunutils_v5.x.x")
@@ -238,7 +285,19 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         settings_manager = module.UserSettings(self.parent)
 
         # Save settings
+        level_path = settings["Level Path"].value
         render_presets_path = settings["Movie Render Queue Presets Path"].value
+
+        # Retrieve saved level map
+        level_map = settings_manager.retrieve(
+            "publish2.level_map",
+            default={},
+            scope=settings_manager.SCOPE_PROJECT
+        )
+
+        asset_path = item.properties.get("asset_path")
+        level_map[asset_path] = level_path
+        settings_manager.store("publish2.level_map", level_map, settings_manager.SCOPE_PROJECT)
         settings_manager.store("publish2.movie_render_queue_presets_path", render_presets_path, settings_manager.SCOPE_PROJECT)
 
     def accept(self, settings, item):
@@ -292,7 +351,7 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         # we've validated the work and publish templates. add them to the item properties
         # for use in subsequent methods
         item.properties["publish_template"] = publish_template
-        self.load_saved_ui_settings(settings)
+        self.load_saved_ui_settings(settings, item)
         return {
             "accepted": accepted,
             "checked": checked
@@ -378,11 +437,10 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         unreal.log("context fields: {}".format(fields))
 
         # Ensure that the current map is saved on disk
-        unreal_map = unreal.EditorLevelLibrary.get_editor_world()
-        unreal_map_path = unreal_map.get_path_name()
+        level_path = settings["Level Path"].value
 
         # Transient maps are not supported, must be saved on disk
-        if unreal_map_path.startswith("/Temp/"):
+        if level_path.startswith("/Temp/"):
             self.logger.error("Current map must be saved first.")
             return False
 
@@ -392,7 +450,7 @@ class UnrealMoviePublishPlugin(HookBaseClass):
 
         # Stash the level sequence and map paths in properties for the render
         item.properties["unreal_asset_path"] = asset_path
-        item.properties["unreal_map_path"] = unreal_map_path
+        item.properties["unreal_map_path"] = level_path
 
         # Add a version number to the fields, incremented from the current asset version
         version_number = self._unreal_asset_get_version(asset_path)
@@ -405,7 +463,6 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         fields["MM"] = date.month
         fields["DD"] = date.day
 
-        # Check if we can use the Movie Render queue available from 4.26
         render_presets = None
         if hasattr(unreal, "MoviePipelineAppleProResOutput"):
             self.logger.info("Movie Render Queue will be used for rendering.")
@@ -437,7 +494,7 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         item.properties["publish_path"] = publish_path
         item.properties["publish_type"] = "Unreal Render"
         item.properties["version_number"] = version_number
-        self.save_ui_settings(settings)
+        self.save_ui_settings(settings, item)
         return True
 
     def _check_render_settings(self, render_config):
@@ -510,6 +567,7 @@ class UnrealMoviePublishPlugin(HookBaseClass):
             raise RuntimeError(
                 "Unable to render %s" % publish_path
             )
+
         # Increment the version number
         self._unreal_asset_set_version(unreal_asset_path, item.properties["version_number"])
 
