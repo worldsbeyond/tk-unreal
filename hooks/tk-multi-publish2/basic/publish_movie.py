@@ -779,11 +779,12 @@ class UnrealMoviePublishPlugin(HookBaseClass):
         manifest_path = new_path.replace("\\", "/")
 
         self.logger.debug("Manifest short path: %s" % manifest_path)
-        # Command line parameters were retrieved by submitting a queue in Unreal Editor with
-        # a MoviePipelineNewProcessExecutor executor.
-        # https://docs.unrealengine.com/4.27/en-US/PythonAPI/class/MoviePipelineNewProcessExecutor.html?highlight=executor
+
+        sys_path, sys_file = os.path.split(sys.executable)
+        ue_executable = os.path.join(sys_path, "UnrealEditor-Cmd.exe")
+
         cmd_args = [
-            "\"%s\"" % sys.executable,
+            "\"%s\"" % ue_executable,
             "\"%s\"" % os.path.join(
                 unreal.SystemLibrary.get_project_directory(),
                 "%s.uproject" % unreal.SystemLibrary.get_game_name(),
@@ -795,36 +796,39 @@ class UnrealMoviePublishPlugin(HookBaseClass):
             "-FixedSeed",
             "-log",
             "-Unattended",
+            "-MRQInstance",
+            "-deterministicaudio",
+            "-audiomixer",
             "-messaging",
             "-SessionName=\"Publish2 Movie Render\"",
             "-nohmd",
             "-windowed",
             "-ResX=1280",
             "-ResY=720",
-            # TODO: check what these settings are
             "-dpcvars=%s" % ",".join([
                 "sg.ViewDistanceQuality=4",
                 "sg.AntiAliasingQuality=4",
                 "sg.ShadowQuality=4",
+                "sg.GlobalIlluminationQuality=4",
+                "sg.ReflectionQuality=4",
                 "sg.PostProcessQuality=4",
                 "sg.TextureQuality=4",
                 "sg.EffectsQuality=4",
                 "sg.FoliageQuality=4",
                 "sg.ShadingQuality=4",
-                "r.TextureStreaming=0",
-                "r.ForceLOD=0",
-                "r.SkeletalMeshLODBias=-10",
-                "r.ParticleLODBias=-10",
-                "foliage.DitheredLOD=0",
-                "foliage.ForceLOD=0",
-                "r.Shadow.DistanceScale=10",
-                "r.ShadowQuality=5",
-                "r.Shadow.RadiusThreshold=0.001000",
-                "r.ViewDistanceScale=50",
                 "r.D3D12.GPUTimeout=0",
+                "GeometryCache.Streamer.BlockTillFinishStreaming=1",
+                "GeometryCache.Streamer.ShowNotification=0",
                 "a.URO.Enable=0",
+                "au.NeverMuteNonRealtimeAudioDevices=1",
+                "r.SkyLight.RealTimeReflectionCapture.TimeSlice=0",
+                "r.VolumetricRenderTarget=1",
+                "r.VolumetricRenderTaget.Mode=3",
+                "wp.Runtime.BlockOnSlowStreaming=0",
+                "p.Chaos.ImmPhys.MinStepTime=0",
+                "r.SkipRedundantTransformUpdate=0",
+                "p.ChaosCloth.UseTimeStepSmoothing=0"
             ]),
-            "-execcmds=r.HLOD 0",
             # This needs to be a path relative the to the Unreal project "Saved" folder.
             "-MoviePipelineConfig=\"%s\"" % manifest_path
         ]
